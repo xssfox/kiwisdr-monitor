@@ -1,0 +1,250 @@
+Resources:
+  Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:PutMetricData'
+                Resource: '*'
+          PolicyName: CloudWatchMetrics
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "kiwi"
+      ScheduleExpression: "rate(5 minutes)"
+      State: "ENABLED"
+      Targets: 
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: "KiwiLambda"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRule.Arn
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt Role.Arn
+      Code:
+        ZipFile: |
+          import urllib.request
+          from urllib.parse import urlparse
+          import boto3
+          import os
+
+          cw = boto3.client('cloudwatch')
+
+          def get_status(url):
+              status = urllib.request.urlopen(url, timeout=3).read()
+              status = status.decode('utf-8').split("\n")
+              data = {}
+              for line in status:
+                  try:
+                      (key, value) = line.split("=",1)
+                      data[key] = value
+                  except ValueError:
+                      pass
+              return data
+          def post_cw_data(host,value, metric="Users", unit="Count"):
+              try:
+                  response = cw.put_metric_data(
+                      Namespace='kiwisdr',
+                      MetricData=[
+                          {
+                              'MetricName': metric,
+                              'Dimensions': [
+                                  {
+                                      'Name': 'host',
+                                      'Value': host
+                                  },
+                              ],
+                              'Value': value,
+                              'Unit': unit
+                          },
+                      ]
+                  )
+              except:
+                  pass
+          def handler(event, context):
+              hosts = os.environ.get('HOSTS').split(",")
+              for host in hosts:
+                  try:
+                      status = get_status(host)
+                      dem = urlparse(host).netloc
+                      post_cw_data(dem, float(status['users']))
+                      post_cw_data(dem, float(status['gps_good']),'GPS-Sats')
+                      post_cw_data(dem, float(status['uptime']),'Uptime', 'Seconds')
+                      post_cw_data(dem, 1 if status['status'] == "active" else 0 ,'Active', 'None')
+                      post_cw_data(dem, 0 if status['offline'] == "no" else 1,'Offline', 'None')
+                  except:
+                      pass
+
+          if __name__ == "__main__":
+              handler({},{})
+      Environment:
+        Variables: 
+          HOSTS: !Ref HOSTS
+      Runtime: python3.7
+      Timeout: 5
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties: 
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+              {
+                  "type": "metric",
+                  "x": 18,
+                  "y": 6,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "kiwisdr", "Offline", "host", "kiwisdr.prideradio.group:8073", { "region": "${AWS::Region}", "label": "PrideRadioGroup Loop" } ],
+                          [ "...", "kiwisdr.prideradio.group:8074", { "region": "${AWS::Region}", "label": "PrideRadioGroup Dipole" } ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "us-east-1",
+                      "stat": "Average",
+                      "period": 300,
+                      "yAxis": {
+                          "left": {
+                              "label": "",
+                              "min": 0
+                          }
+                      },
+                      "liveData": true,
+                      "title": "Offline"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 0,
+                  "width": 24,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "kiwisdr", "Users", "host", "kiwisdr.prideradio.group:8073", { "region": "${AWS::Region}", "label": "PrideRadioGroup Loop" } ],
+                          [ "...", "kiwisdr.prideradio.group:8074", { "region": "${AWS::Region}", "label": "PrideRadioGroup Dipole" } ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "us-east-1",
+                      "stat": "Average",
+                      "period": 300,
+                      "yAxis": {
+                          "left": {
+                              "label": "Users",
+                              "min": 0
+                          }
+                      },
+                      "liveData": true,
+                      "title": "User Counts"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 6,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "kiwisdr", "GPS-Sats", "host", "kiwisdr.prideradio.group:8073", { "region": "${AWS::Region}", "label": "PrideRadioGroup Loop" } ],
+                          [ "...", "kiwisdr.prideradio.group:8074", { "region": "${AWS::Region}", "label": "PrideRadioGroup Dipole" } ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "us-east-1",
+                      "stat": "Average",
+                      "period": 300,
+                      "yAxis": {
+                          "left": {
+                              "label": "",
+                              "min": 0
+                          }
+                      },
+                      "liveData": true,
+                      "title": "GPS Sats"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 6,
+                  "y": 6,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "kiwisdr", "Uptime", "host", "kiwisdr.prideradio.group:8073", { "region": "${AWS::Region}", "label": "PrideRadioGroup Loop" } ],
+                          [ "...", "kiwisdr.prideradio.group:8074", { "region": "${AWS::Region}", "label": "PrideRadioGroup Dipole" } ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "us-east-1",
+                      "stat": "Average",
+                      "period": 300,
+                      "yAxis": {
+                          "left": {
+                              "label": "",
+                              "min": 0
+                          }
+                      },
+                      "liveData": true,
+                      "title": "Uptime"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 6,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "kiwisdr", "Active", "host", "kiwisdr.prideradio.group:8073", { "region": "${AWS::Region}", "label": "PrideRadioGroup Loop" } ],
+                          [ "...", "kiwisdr.prideradio.group:8074", { "region": "${AWS::Region}", "label": "PrideRadioGroup Dipole" } ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "us-east-1",
+                      "stat": "Average",
+                      "period": 300,
+                      "yAxis": {
+                          "left": {
+                              "label": "",
+                              "min": 0
+                          }
+                      },
+                      "liveData": true,
+                      "title": "Active"
+                  }
+              }
+          ]
+        }
+      DashboardName: kiwisdr
+Parameters:
+  HOSTS:
+    Type: String
+    Description: Hosts seperated by commas
+    Default: http://kiwisdr.prideradio.group:8073/status,http://kiwisdr.prideradio.group:8074/status
